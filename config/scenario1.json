@@ -1,0 +1,8 @@
+{
+  "NumNodes": 4,
+  "BlocksToFinalize": 5,
+  "Seed": 42,
+  "MaxTicks": 200,
+  "LatencyMin": 1,
+  "LatencyMax": 3
+}
