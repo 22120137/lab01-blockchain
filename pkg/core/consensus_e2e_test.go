@@ -13,7 +13,7 @@ func TestConsensus_SimpleFinalization(t *testing.T) {
 	// deterministic small network
 	numNodes := 4
 	seed := int64(12345)
-	net := NewNetwork(seed, 1, 1)
+	net := NewNetwork(seed, 1, 1, 0, 0, 64, nil)
 
 	// discard logs to keep test output clean
 	logger := util.NewLogger(io.Discard)

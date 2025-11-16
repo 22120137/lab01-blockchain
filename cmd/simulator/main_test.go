@@ -9,24 +9,32 @@ import (
 
 // duplicate config struct
 type testConfig struct {
-	NumNodes         int   `json:"NumNodes"`
-	BlocksToFinalize int   `json:"BlocksToFinalize"`
-	Seed             int64 `json:"Seed"`
-	MaxTicks         int   `json:"MaxTicks"`
-	LatencyMin       int   `json:"LatencyMin"`
-	LatencyMax       int   `json:"LatencyMax"`
+	NumNodes          int     `json:"NumNodes"`
+	BlocksToFinalize  int     `json:"BlocksToFinalize"`
+	Seed              int64   `json:"Seed"`
+	MaxTicks          int     `json:"MaxTicks"`
+	LatencyMin        int     `json:"LatencyMin"`
+	LatencyMax        int     `json:"LatencyMax"`
+	DropRate          float64 `json:"DropRate"`
+	DuplicateRate     float64 `json:"DuplicateRate"`
+	MaxQueuePerTick   int     `json:"MaxQueue"`
+	DeterministicLogs bool    `json:"DeterministicLogs"`
 }
 
 // findProjectRoot walks up from cwd until it finds go.mod or reaches root
 func findProjectRoot() (string, error) {
 	dir, err := os.Getwd()
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir, nil
 		}
 		parent := filepath.Dir(dir)
-		if parent == dir { break } // reached filesystem root
+		if parent == dir {
+			break
+		} // reached filesystem root
 		dir = parent
 	}
 	return "", os.ErrNotExist

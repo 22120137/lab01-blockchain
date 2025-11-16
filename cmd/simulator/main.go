@@ -15,12 +15,16 @@ import (
 )
 
 type Config struct {
-	NumNodes         int   `json:"NumNodes"`
-	BlocksToFinalize int   `json:"BlocksToFinalize"`
-	Seed             int64 `json:"Seed"`
-	MaxTicks         int   `json:"MaxTicks"`
-	LatencyMin       int   `json:"LatencyMin"`
-	LatencyMax       int   `json:"LatencyMax"`
+	NumNodes          int     `json:"NumNodes"`
+	BlocksToFinalize  int     `json:"BlocksToFinalize"`
+	Seed              int64   `json:"Seed"`
+	MaxTicks          int     `json:"MaxTicks"`
+	LatencyMin        int     `json:"LatencyMin"`
+	LatencyMax        int     `json:"LatencyMax"`
+	DropRate          float64 `json:"DropRate"`
+	DuplicateRate     float64 `json:"DuplicateRate"`
+	MaxQueuePerTick   int     `json:"MaxQueue"`
+	DeterministicLogs bool    `json:"DeterministicLogs"`
 }
 
 func main() {
@@ -44,11 +48,20 @@ func main() {
 	}
 	defer f.Close()
 	w := io.MultiWriter(os.Stdout, f)
-	logger := util.NewLogger(w)
+	var logger *util.Logger
+	if cfg.DeterministicLogs {
+		logger = util.NewDeterministicLogger(w)
+	} else {
+		logger = util.NewLogger(w)
+	}
 
 	rand.Seed(cfg.Seed)
 
-	net := core.NewNetwork(cfg.Seed, cfg.LatencyMin, cfg.LatencyMax)
+	if cfg.MaxQueuePerTick == 0 {
+		cfg.MaxQueuePerTick = 1024
+	}
+
+	net := core.NewNetwork(cfg.Seed, cfg.LatencyMin, cfg.LatencyMax, cfg.DropRate, cfg.DuplicateRate, cfg.MaxQueuePerTick, logger)
 
 	// create nodes
 	nodes := make([]*core.Node, 0, cfg.NumNodes)

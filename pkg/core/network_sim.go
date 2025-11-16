@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"math/rand"
 	"sync"
+
+	"lab01/pkg/util"
 )
 
 // Message wrapper
@@ -15,26 +17,40 @@ type NetMsg struct {
 
 // Network deterministic tick-based scheduler
 type Network struct {
-	seed       int64
-	rng        *rand.Rand
-	minLatency int
-	maxLatency int
+	seed            int64
+	rng             *rand.Rand
+	minLatency      int
+	maxLatency      int
+	dropRate        float64
+	duplicateRate   float64
+	maxQueuePerTick int
+	logger          *util.Logger
 
-	mu     sync.Mutex
-	nodes  map[NodeID]*Node
-	queues map[int][]NetMsg // tick -> messages
+	mu      sync.Mutex
+	nodes   map[NodeID]*Node
+	queues  map[int][]NetMsg // tick -> messages
 	curTick int
 }
 
-func NewNetwork(seed int64, minLat, maxLat int) *Network {
+func NewNetwork(seed int64, minLat, maxLat int, dropRate, duplicateRate float64, maxQueue int, logger *util.Logger) *Network {
 	r := rand.New(rand.NewSource(seed))
+	if maxLat < minLat {
+		maxLat = minLat
+	}
+	if maxQueue <= 0 {
+		maxQueue = 1024
+	}
 	return &Network{
-		seed:      seed,
-		rng:       r,
-		minLatency: minLat,
-		maxLatency: maxLat,
-		queues:    make(map[int][]NetMsg),
-		nodes:     make(map[NodeID]*Node),
+		seed:            seed,
+		rng:             r,
+		minLatency:      minLat,
+		maxLatency:      maxLat,
+		dropRate:        dropRate,
+		duplicateRate:   duplicateRate,
+		maxQueuePerTick: maxQueue,
+		queues:          make(map[int][]NetMsg),
+		nodes:           make(map[NodeID]*Node),
+		logger:          logger,
 	}
 }
 
@@ -98,15 +114,48 @@ func RegisterNode(net *Network, n *Node) {
 	}
 }
 
+func (net *Network) logf(format string, a ...interface{}) {
+	if net.logger == nil {
+		return
+	}
+	net.logger.Printf("NET|"+format, a...)
+}
+
+func (net *Network) enqueue(tick int, msg NetMsg) bool {
+	if net.maxQueuePerTick > 0 && len(net.queues[tick]) >= net.maxQueuePerTick {
+		return false
+	}
+	net.queues[tick] = append(net.queues[tick], msg)
+	return true
+}
+
 func (net *Network) Send(from, to NodeID, body interface{}) {
 	// protect rng and queues with mutex
 	net.mu.Lock()
 	lat := net.minLatency
 	if net.maxLatency > net.minLatency {
-		lat += net.rng.Intn(net.maxLatency-net.minLatency+1)
+		lat += net.rng.Intn(net.maxLatency - net.minLatency + 1)
 	}
 	deliveryTick := net.curTick + lat
-	net.queues[deliveryTick] = append(net.queues[deliveryTick], NetMsg{From: from, To: to, Body: body})
+	if net.dropRate > 0 && net.rng.Float64() < net.dropRate {
+		net.logf("DROP|from=%s|to=%s|lat=%d", from, to, lat)
+		net.mu.Unlock()
+		return
+	}
+	msg := NetMsg{From: from, To: to, Body: body}
+	if !net.enqueue(deliveryTick, msg) {
+		net.logf("QUEUE_FULL|from=%s|to=%s|tick=%d", from, to, deliveryTick)
+		net.mu.Unlock()
+		return
+	}
+	net.logf("SEND|from=%s|to=%s|deliver_tick=%d|type=%T", from, to, deliveryTick, body)
+	if net.duplicateRate > 0 && net.rng.Float64() < net.duplicateRate {
+		if net.enqueue(deliveryTick, msg) {
+			net.logf("DUP|from=%s|to=%s|tick=%d", from, to, deliveryTick)
+		} else {
+			net.logf("DUP_DROP|from=%s|to=%s|tick=%d", from, to, deliveryTick)
+		}
+	}
 	net.mu.Unlock()
 }
 
@@ -148,8 +197,10 @@ func (net *Network) Tick() {
 		// non-blocking send
 		select {
 		case n.inbox <- m:
+			net.logf("DELIVER|from=%s|to=%s|tick=%d|type=%T", m.From, m.To, net.curTick, m.Body)
 		default:
 			// drop if full
+			net.logf("INBOX_FULL|to=%s|tick=%d", m.To, net.curTick)
 		}
 	}
 }
