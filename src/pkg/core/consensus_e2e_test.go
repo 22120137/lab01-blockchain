@@ -86,6 +86,27 @@ func TestConsensusDeterministicState(t *testing.T) {
 	}
 }
 
+func TestConsensusNoConflictingFinalizationWithDrops(t *testing.T) {
+	logger := util.NewDeterministicLogger(io.Discard)
+	net := NewNetwork(4242, 1, 6, 0.25, 0.1, 512, logger, 3, 6)
+	nodes := buildTestNodes(net, logger, 7, 4242)
+
+	runTicks(net, nodes, 1500)
+
+	var finalized uint64
+	for _, n := range nodes {
+		h := n.FinalizedHeight()
+		if h == 0 {
+			continue
+		}
+		if finalized == 0 {
+			finalized = h
+		} else if finalized != h {
+			t.Fatalf("conflicting finalization heights: %d vs %d", finalized, h)
+		}
+	}
+}
+
 func buildTestNodes(net *Network, logger *util.Logger, num int, seed int64) []*Node {
 	nodes := make([]*Node, 0, num)
 	for i := 0; i < num; i++ {
@@ -124,6 +145,26 @@ func primeNodes(nodes []*Node, tick uint64) {
 	for _, n := range nodes {
 		n.maybeGenerateSelfTx(tick)
 	}
+}
+
+func runUntilMajorityFinalized(net *Network, nodes []*Node, height uint64, maxTicks int) bool {
+	threshold := len(nodes)/2 + 1
+	for i := 0; i < maxTicks; i++ {
+		net.Tick()
+		for _, n := range nodes {
+			n.OnTick()
+		}
+		count := 0
+		for _, n := range nodes {
+			if n.FinalizedHeight() >= height {
+				count++
+			}
+		}
+		if count >= threshold {
+			return true
+		}
+	}
+	return false
 }
 
 func runDeterministicScenario(seed int64) StateSnapshot {
