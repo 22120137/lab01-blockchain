@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 func main() {
@@ -41,9 +44,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "logs differ between runs")
 		os.Exit(1)
 	}
+	s1, err := stateHashFromLog(tmp1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "state hash run1: %v\n", err)
+		os.Exit(1)
+	}
+	s2, err := stateHashFromLog(tmp2)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "state hash run2: %v\n", err)
+		os.Exit(1)
+	}
+	if !bytes.Equal(s1, s2) {
+		fmt.Fprintln(os.Stderr, "final state differs between runs")
+		os.Exit(1)
+	}
 
 	sum := sha256.Sum256(b1)
-	fmt.Printf("Determinism check passed. Log hash: %x\n", sum[:])
+	fmt.Printf("Determinism check passed. Log hash: %x State hash: %x\n", sum[:], s1)
 }
 
 func runSimulator(config, out string) error {
@@ -51,4 +68,40 @@ func runSimulator(config, out string) error {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func stateHashFromLog(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	var stateLine string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "STATE|") {
+			stateLine = line
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if stateLine == "" {
+		return nil, fmt.Errorf("no STATE line found")
+	}
+	parts := strings.SplitN(stateLine, "|", 3)
+	if len(parts) < 3 {
+		return nil, fmt.Errorf("malformed STATE line")
+	}
+	var payload interface{}
+	if err := json.Unmarshal([]byte(parts[2]), &payload); err != nil {
+		return nil, err
+	}
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return sum[:], nil
 }

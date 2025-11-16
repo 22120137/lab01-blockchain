@@ -265,18 +265,13 @@ func (net *Network) Broadcast(from NodeID, body interface{}) {
 	}
 }
 
-func (net *Network) BroadcastWithDelay(from NodeID, body interface{}, extra int) {
-	net.mu.Lock()
-	ids := make([]NodeID, 0, len(net.nodes))
-	for id := range net.nodes {
-		ids = append(ids, id)
+func (net *Network) SendBlockBody(from, to NodeID, blk *Block) {
+	if blk == nil {
+		return
 	}
-	sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
-	net.mu.Unlock()
-
-	for _, id := range ids {
-		net.sendWithExtraDelay(from, id, body, extra)
-	}
+	copyBlock := *blk
+	copyBlock.Txns = append([]Transaction(nil), blk.Txns...)
+	net.sendWithExtraDelay(from, to, copyBlock, 1)
 }
 
 func (net *Network) Tick() {

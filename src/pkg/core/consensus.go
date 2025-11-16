@@ -38,7 +38,12 @@ type Node struct {
 	currentTick      uint64
 	nextSelfTxTick   uint64
 	rounds           map[uint64]uint64
+	roundStart       map[uint64]uint64
+	roundTimeout     uint64
 	lastVoteTick     map[uint64]uint64
+	bodySent         map[uint64]map[string]map[NodeID]bool
+	lockedBlock      map[uint64]*Block
+	lockedBlockHash  map[uint64]string
 	Log              *util.Logger
 	numNodes         int
 
@@ -68,7 +73,12 @@ func NewNode(id NodeID, seed int64, numNodes int, chainID string, logger *util.L
 		currentTick:      0,
 		nextSelfTxTick:   0,
 		rounds:           make(map[uint64]uint64),
+		roundStart:       make(map[uint64]uint64),
+		roundTimeout:     60,
 		lastVoteTick:     make(map[uint64]uint64),
+		bodySent:         make(map[uint64]map[string]map[NodeID]bool),
+		lockedBlock:      make(map[uint64]*Block),
+		lockedBlockHash:  make(map[uint64]string),
 		Log:              logger,
 		numNodes:         numNodes,
 		seed:             seed,
@@ -93,7 +103,15 @@ func (n *Node) OnTick() {
 
 	n.mu.Lock()
 	h := n.height + 1
-	proposer := NodeID(fmt.Sprintf("node%02d", int(h-1)%n.numNodes))
+	n.ensureRoundLocked(h, tick)
+	if tick-n.roundStart[h] >= n.roundTimeout {
+		n.rounds[h]++
+		n.roundStart[h] = tick
+		n.lastProposalTick[h] = 0
+		delete(n.votes, h)
+		n.Log.Printf("NODE|%s|ROUND_CHANGE|H=%d|round=%d", n.id, h, n.rounds[h])
+	}
+	proposer := n.roundProposerLocked(h)
 	if proposer == n.id {
 		if last := n.lastProposalTick[h]; last != 0 && tick-last < n.proposalInterval {
 			n.mu.Unlock()
@@ -101,21 +119,39 @@ func (n *Node) OnTick() {
 		}
 		n.lastProposalTick[h] = tick
 		parentHash := cloneBytes(n.lastBlockHash)
-		blockTxs := n.selectTxsForBlockLocked()
-		st := n.state.Clone()
-		for _, tx := range blockTxs {
-			_ = ApplyTx(st, tx)
+		var blk *Block
+		if lock := n.lockedBlock[h]; lock != nil && n.lockedBlockHash[h] != "" {
+			blk = cloneBlock(lock)
+		} else {
+			blockTxs := n.selectTxsForBlockLocked()
+			stateCopy := n.state.Clone()
+			for _, tx := range blockTxs {
+				_ = ApplyTx(stateCopy, tx)
+			}
+			blk = &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, Proposer: n.id}, Txns: blockTxs}
+			blk.Header.StateHash = StateHash(stateCopy)
 		}
-		blk := &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, StateHash: nil, Proposer: n.id}, Txns: blockTxs}
-		blk.Header.StateHash = StateHash(st)
+		if len(blk.Txns) == 0 {
+			stateCopy := n.state.Clone()
+			blk = &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, Proposer: n.id}, Txns: nil}
+			blk.Header.StateHash = StateHash(stateCopy)
+		}
+		if blk.Header.StateHash == nil {
+			stateCopy := n.state.Clone()
+			for _, tx := range blk.Txns {
+				_ = ApplyTx(stateCopy, tx)
+			}
+			blk.Header.StateHash = StateHash(stateCopy)
+		}
 		hb := MarshalHeaderCanonical(&blk.Header)
 		blk.Header.Sig = SignWithDomain(n.domainHeader(), hb, n.kp.Priv)
-		hashHex := hex.EncodeToString(HashBlockHeader(&blk.Header))
+		hash := HashBlockHeader(&blk.Header)
+		hashHex := hex.EncodeToString(hash)
 		n.storePendingBlockLocked(h, hashHex, blk)
 		n.mu.Unlock()
 		n.net.Broadcast(n.id, blk.Header)
-		n.net.BroadcastWithDelay(n.id, blk, 1)
-		n.Log.Printf("NODE|%s|PROPOSE|H=%d|txs=%d", n.id, h, len(blockTxs))
+		n.maybeSendBlockBody(h, hashHex, n.id)
+		n.Log.Printf("NODE|%s|PROPOSE|H=%d|txs=%d", n.id, h, len(blk.Txns))
 		return
 	}
 	n.mu.Unlock()
@@ -132,6 +168,21 @@ func (n *Node) drainInbox() {
 	}
 }
 
+func (n *Node) ensureRoundLocked(height uint64, tick uint64) {
+	if _, ok := n.rounds[height]; !ok {
+		n.rounds[height] = 0
+	}
+	if _, ok := n.roundStart[height]; !ok {
+		n.roundStart[height] = tick
+	}
+}
+
+func (n *Node) roundProposerLocked(height uint64) NodeID {
+	round := n.rounds[height]
+	idx := int((int(height-1) + int(round)) % n.numNodes)
+	return NodeID(fmt.Sprintf("node%02d", idx))
+}
+
 func (n *Node) domain(tag string) string {
 	if n.chainID == "" {
 		return tag + ":"
@@ -142,6 +193,52 @@ func (n *Node) domain(tag string) string {
 func (n *Node) domainTx() string     { return n.domain("TX") }
 func (n *Node) domainHeader() string { return n.domain("HEADER") }
 func (n *Node) domainVote() string   { return n.domain("VOTE") }
+
+func (n *Node) ensureBodySentLocked(height uint64, hashHex string) {
+	if _, ok := n.bodySent[height]; !ok {
+		n.bodySent[height] = make(map[string]map[NodeID]bool)
+	}
+	if _, ok := n.bodySent[height][hashHex]; !ok {
+		n.bodySent[height][hashHex] = make(map[NodeID]bool)
+	}
+}
+
+func (n *Node) maybeSendBlockBody(height uint64, hashHex string, to NodeID) {
+	n.mu.Lock()
+	blocks := n.pendingBlocks[height]
+	blk := blocks[hashHex]
+	if blk == nil || blk.Header.Proposer != n.id {
+		n.mu.Unlock()
+		return
+	}
+	n.ensureBodySentLocked(height, hashHex)
+	if n.bodySent[height][hashHex][to] {
+		n.mu.Unlock()
+		return
+	}
+	n.bodySent[height][hashHex][to] = true
+	copyBlock := *blk
+	copyBlock.Header = blk.Header
+	copyBlock.Txns = append([]Transaction(nil), blk.Txns...)
+	n.mu.Unlock()
+	n.net.SendBlockBody(n.id, to, &copyBlock)
+	n.Log.Printf("NODE|%s|SEND_BLOCK|to=%s|H=%d", n.id, to, height)
+}
+
+func (n *Node) lockBlock(height uint64, hashHex string) {
+	if n.lockedBlockHash[height] == hashHex {
+		return
+	}
+	blocks := n.pendingBlocks[height]
+	if blocks == nil {
+		return
+	}
+	if blk, ok := blocks[hashHex]; ok && blk != nil {
+		n.lockedBlock[height] = blk
+		n.lockedBlockHash[height] = hashHex
+		n.Log.Printf("NODE|%s|LOCK|H=%d|hash=%s", n.id, height, hashHex)
+	}
+}
 
 func (n *Node) handleNetMsg(m NetMsg) {
 	// handle types: BlockHeader, Block, Vote
@@ -163,8 +260,15 @@ func (n *Node) handleNetMsg(m NetMsg) {
 				n.Log.Printf("NODE|%s|RECV|HEADER|bad_parent|H=%d", n.id, body.Height)
 				break
 			}
-			// prevote
+			n.mu.Lock()
+			lockHash := n.lockedBlockHash[body.Height]
+			n.mu.Unlock()
 			hash := sha256.Sum256(MarshalHeaderCanonical(&body))
+			if lockHash != "" && lockHash != hex.EncodeToString(hash[:]) {
+				n.Log.Printf("NODE|%s|RECV|HEADER|conflicts_lock|H=%d", n.id, body.Height)
+				break
+			}
+			// prevote
 			n.broadcastPrevote(body.Height, hash[:])
 		} else {
 			n.Log.Printf("NODE|%s|RECV|HEADER|badsig|proposer=%s|H=%d", n.id, body.Proposer, body.Height)
@@ -194,6 +298,7 @@ func (n *Node) handleNetMsg(m NetMsg) {
 		}
 		// tally votes
 		hashHex := hex.EncodeToString(body.BlockHash)
+		sendBody := false
 		n.mu.Lock()
 		if _, ok := n.votes[body.Height]; !ok {
 			n.votes[body.Height] = make(map[string]map[VotePhase]map[NodeID]bool)
@@ -208,6 +313,7 @@ func (n *Node) handleNetMsg(m NetMsg) {
 		// check quorum
 		num := len(n.votes[body.Height][hashHex][PhasePrevote])
 		if num >= (n.numNodes/2 + 1) {
+			n.lockBlock(body.Height, hashHex)
 			if n.sentPrecommit[body.Height] != hashHex {
 				pc := Vote{Voter: n.id, Height: body.Height, BlockHash: body.BlockHash, Phase: PhasePrecommit}
 				pc.Sig = SignWithDomain(n.domainVote(), MarshalVoteCanonical(&pc), n.kp.Priv)
@@ -217,7 +323,13 @@ func (n *Node) handleNetMsg(m NetMsg) {
 			}
 		}
 		n.tryFinalizeLocked(body.Height, hashHex)
+		if body.Phase == PhasePrevote {
+			sendBody = true
+		}
 		n.mu.Unlock()
+		if sendBody {
+			n.maybeSendBlockBody(body.Height, hashHex, body.Voter)
+		}
 	default:
 		// unknown
 	}
@@ -241,11 +353,18 @@ func (n *Node) handleBlockMsg(body *Block, from NodeID) {
 		n.Log.Printf("NODE|%s|RECV|BLOCK|bad_parent|H=%d", n.id, body.Header.Height)
 		return
 	}
+	n.mu.Lock()
+	lockHash := n.lockedBlockHash[body.Header.Height]
+	n.mu.Unlock()
+	hash := HashBlockHeader(&body.Header)
+	hashHex := hex.EncodeToString(hash)
+	if lockHash != "" && lockHash != hashHex {
+		n.Log.Printf("NODE|%s|RECV|BLOCK|conflicts_lock|H=%d", n.id, body.Header.Height)
+		return
+	}
 	if !n.verifyBlockTransactions(*body) {
 		return
 	}
-	hash := HashBlockHeader(&body.Header)
-	hashHex := hex.EncodeToString(hash)
 	n.mu.Lock()
 	n.storePendingBlockLocked(body.Header.Height, hashHex, body)
 	n.mu.Unlock()
@@ -393,6 +512,7 @@ func (n *Node) storePendingBlockLocked(height uint64, hashHex string, blk *Block
 	}
 	copyBlock := &Block{Header: headerCopy, Txns: txCopy}
 	n.pendingBlocks[height][hashHex] = copyBlock
+	n.ensureBodySentLocked(height, hashHex)
 	n.tryFinalizeLocked(height, hashHex)
 }
 
@@ -429,6 +549,12 @@ func (n *Node) tryFinalizeLocked(height uint64, hashHex string) {
 	delete(blocks, hashHex)
 	if len(blocks) == 0 {
 		delete(n.pendingBlocks, height)
+	}
+	if sentByHash, ok := n.bodySent[height]; ok {
+		delete(sentByHash, hashHex)
+		if len(sentByHash) == 0 {
+			delete(n.bodySent, height)
+		}
 	}
 	n.Log.Printf("NODE|%s|FINALIZED|H=%d", n.id, height)
 }
@@ -486,6 +612,25 @@ func cloneBytes(b []byte) []byte {
 	return cp
 }
 
+func cloneBlock(b *Block) *Block {
+	if b == nil {
+		return nil
+	}
+	headerCopy := BlockHeader{
+		ParentHash: cloneBytes(b.Header.ParentHash),
+		Height:     b.Header.Height,
+		StateHash:  cloneBytes(b.Header.StateHash),
+		Proposer:   b.Header.Proposer,
+		Sig:        cloneBytes(b.Header.Sig),
+	}
+	txCopy := make([]Transaction, len(b.Txns))
+	for i, tx := range b.Txns {
+		txCopy[i] = tx
+		txCopy[i].Sig = cloneBytes(tx.Sig)
+	}
+	return &Block{Header: headerCopy, Txns: txCopy}
+}
+
 func (n *Node) ID() NodeID {
 	return n.id
 }
@@ -514,4 +659,12 @@ func (n *Node) SnapshotState() StateSnapshot {
 		Data:   clone.Data,
 		Nonces: clone.Nonces,
 	}
+}
+
+func (n *Node) LedgerSnapshot() []Block {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cp := make([]Block, len(n.ledger))
+	copy(cp, n.ledger)
+	return cp
 }
