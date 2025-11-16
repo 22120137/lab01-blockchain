@@ -2,6 +2,7 @@ package core
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"math/rand"
 	"sync"
 
@@ -17,22 +18,26 @@ type NetMsg struct {
 
 // Network deterministic tick-based scheduler
 type Network struct {
-	seed            int64
-	rng             *rand.Rand
-	minLatency      int
-	maxLatency      int
-	dropRate        float64
-	duplicateRate   float64
-	maxQueuePerTick int
-	logger          *util.Logger
+	seed               int64
+	rng                *rand.Rand
+	minLatency         int
+	maxLatency         int
+	dropRate           float64
+	duplicateRate      float64
+	maxQueuePerTick    int
+	logger             *util.Logger
+	maxOutboundPerTick int
+	blockDurationTicks int
 
-	mu      sync.Mutex
-	nodes   map[NodeID]*Node
-	queues  map[int][]NetMsg // tick -> messages
-	curTick int
+	mu           sync.Mutex
+	nodes        map[NodeID]*Node
+	queues       map[int][]NetMsg // tick -> messages
+	curTick      int
+	sentThisTick map[NodeID]int
+	blockedPeers map[NodeID]int
 }
 
-func NewNetwork(seed int64, minLat, maxLat int, dropRate, duplicateRate float64, maxQueue int, logger *util.Logger) *Network {
+func NewNetwork(seed int64, minLat, maxLat int, dropRate, duplicateRate float64, maxQueue int, logger *util.Logger, maxOutbound, blockDuration int) *Network {
 	r := rand.New(rand.NewSource(seed))
 	if maxLat < minLat {
 		maxLat = minLat
@@ -40,17 +45,27 @@ func NewNetwork(seed int64, minLat, maxLat int, dropRate, duplicateRate float64,
 	if maxQueue <= 0 {
 		maxQueue = 1024
 	}
+	if maxOutbound < 0 {
+		maxOutbound = 0
+	}
+	if blockDuration <= 0 {
+		blockDuration = 5
+	}
 	return &Network{
-		seed:            seed,
-		rng:             r,
-		minLatency:      minLat,
-		maxLatency:      maxLat,
-		dropRate:        dropRate,
-		duplicateRate:   duplicateRate,
-		maxQueuePerTick: maxQueue,
-		queues:          make(map[int][]NetMsg),
-		nodes:           make(map[NodeID]*Node),
-		logger:          logger,
+		seed:               seed,
+		rng:                r,
+		minLatency:         minLat,
+		maxLatency:         maxLat,
+		dropRate:           dropRate,
+		duplicateRate:      duplicateRate,
+		maxQueuePerTick:    maxQueue,
+		logger:             logger,
+		maxOutboundPerTick: maxOutbound,
+		blockDurationTicks: blockDuration,
+		queues:             make(map[int][]NetMsg),
+		nodes:              make(map[NodeID]*Node),
+		sentThisTick:       make(map[NodeID]int),
+		blockedPeers:       make(map[NodeID]int),
 	}
 }
 
@@ -121,6 +136,18 @@ func (net *Network) logf(format string, a ...interface{}) {
 	net.logger.Printf("NET|"+format, a...)
 }
 
+func (net *Network) logEvent(event string, from, to NodeID, body interface{}, extra string) {
+	if net.logger == nil {
+		return
+	}
+	height, _ := extractHeight(body)
+	msg := fmt.Sprintf("event=%s|from=%s|to=%s|tick=%d|height=%d", event, from, to, net.curTick, height)
+	if extra != "" {
+		msg += "|" + extra
+	}
+	net.logger.Printf("NET|%s", msg)
+}
+
 func (net *Network) enqueue(tick int, msg NetMsg) bool {
 	if net.maxQueuePerTick > 0 && len(net.queues[tick]) >= net.maxQueuePerTick {
 		return false
@@ -130,33 +157,48 @@ func (net *Network) enqueue(tick int, msg NetMsg) bool {
 }
 
 func (net *Network) Send(from, to NodeID, body interface{}) {
-	// protect rng and queues with mutex
 	net.mu.Lock()
+	defer net.mu.Unlock()
+	if until, ok := net.blockedPeers[from]; ok && net.curTick >= until {
+		delete(net.blockedPeers, from)
+		net.logEvent("UNBLOCK", from, "", nil, fmt.Sprintf("tick=%d", net.curTick))
+	}
+	if until, ok := net.blockedPeers[from]; ok {
+		net.logEvent("BLOCKED", from, to, body, fmt.Sprintf("until=%d", until))
+		return
+	}
+
+	if net.maxOutboundPerTick > 0 {
+		net.sentThisTick[from]++
+		if net.sentThisTick[from] > net.maxOutboundPerTick {
+			net.blockedPeers[from] = net.curTick + net.blockDurationTicks
+			net.logEvent("RATE_BLOCK", from, to, body, fmt.Sprintf("until=%d", net.blockedPeers[from]))
+			return
+		}
+	}
+
 	lat := net.minLatency
 	if net.maxLatency > net.minLatency {
 		lat += net.rng.Intn(net.maxLatency - net.minLatency + 1)
 	}
 	deliveryTick := net.curTick + lat
 	if net.dropRate > 0 && net.rng.Float64() < net.dropRate {
-		net.logf("DROP|from=%s|to=%s|lat=%d", from, to, lat)
-		net.mu.Unlock()
+		net.logEvent("DROP", from, to, body, fmt.Sprintf("lat=%d", lat))
 		return
 	}
 	msg := NetMsg{From: from, To: to, Body: body}
 	if !net.enqueue(deliveryTick, msg) {
-		net.logf("QUEUE_FULL|from=%s|to=%s|tick=%d", from, to, deliveryTick)
-		net.mu.Unlock()
+		net.logEvent("QUEUE_FULL", from, to, body, fmt.Sprintf("deliver_tick=%d", deliveryTick))
 		return
 	}
-	net.logf("SEND|from=%s|to=%s|deliver_tick=%d|type=%T", from, to, deliveryTick, body)
+	net.logEvent("SEND", from, to, body, fmt.Sprintf("deliver_tick=%d|type=%T", deliveryTick, body))
 	if net.duplicateRate > 0 && net.rng.Float64() < net.duplicateRate {
 		if net.enqueue(deliveryTick, msg) {
-			net.logf("DUP|from=%s|to=%s|tick=%d", from, to, deliveryTick)
+			net.logEvent("DUP", from, to, body, fmt.Sprintf("tick=%d", deliveryTick))
 		} else {
-			net.logf("DUP_DROP|from=%s|to=%s|tick=%d", from, to, deliveryTick)
+			net.logEvent("DUP_DROP", from, to, body, fmt.Sprintf("tick=%d", deliveryTick))
 		}
 	}
-	net.mu.Unlock()
 }
 
 func (net *Network) Broadcast(from NodeID, body interface{}) {
@@ -177,6 +219,13 @@ func (net *Network) Broadcast(from NodeID, body interface{}) {
 func (net *Network) Tick() {
 	net.mu.Lock()
 	net.curTick++
+	net.sentThisTick = make(map[NodeID]int)
+	for id, until := range net.blockedPeers {
+		if net.curTick >= until {
+			delete(net.blockedPeers, id)
+			net.logEvent("UNBLOCK", id, "", nil, fmt.Sprintf("tick=%d", net.curTick))
+		}
+	}
 	msgs := net.queues[net.curTick]
 	// Remove queue entry now under lock
 	delete(net.queues, net.curTick)
@@ -197,10 +246,38 @@ func (net *Network) Tick() {
 		// non-blocking send
 		select {
 		case n.inbox <- m:
-			net.logf("DELIVER|from=%s|to=%s|tick=%d|type=%T", m.From, m.To, net.curTick, m.Body)
+			net.logEvent("DELIVER", m.From, m.To, m.Body, fmt.Sprintf("type=%T", m.Body))
 		default:
 			// drop if full
-			net.logf("INBOX_FULL|to=%s|tick=%d", m.To, net.curTick)
+			net.logEvent("INBOX_FULL", m.From, m.To, m.Body, "")
 		}
+	}
+}
+
+func extractHeight(body interface{}) (uint64, bool) {
+	switch b := body.(type) {
+	case BlockHeader:
+		return b.Height, true
+	case *BlockHeader:
+		if b == nil {
+			return 0, false
+		}
+		return b.Height, true
+	case Block:
+		return b.Header.Height, true
+	case *Block:
+		if b == nil {
+			return 0, false
+		}
+		return b.Header.Height, true
+	case Vote:
+		return b.Height, true
+	case *Vote:
+		if b == nil {
+			return 0, false
+		}
+		return b.Height, true
+	default:
+		return 0, false
 	}
 }

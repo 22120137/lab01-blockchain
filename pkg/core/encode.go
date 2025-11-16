@@ -40,18 +40,30 @@ func MarshalVoteCanonical(v *Vote) []byte {
 	return buf.Bytes()
 }
 
-func StateHash(state map[string]string) []byte {
+func StateHash(state *State) []byte {
 	buf := bytes.NewBuffer(nil)
-	keys := make([]string, 0, len(state))
-	for k := range state {
+	// encode kv pairs
+	keys := make([]string, 0, len(state.Data))
+	for k := range state.Data {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		writeVarLenString(buf, "KV")
 		writeVarLenString(buf, k)
-		writeVarLenString(buf, state[k])
+		writeVarLenString(buf, state.Data[k])
+	}
+	// encode nonce map
+	senders := make([]string, 0, len(state.Nonces))
+	for s := range state.Nonces {
+		senders = append(senders, s)
+	}
+	sort.Strings(senders)
+	for _, s := range senders {
+		writeVarLenString(buf, "NONCE")
+		writeVarLenString(buf, s)
+		binary.Write(buf, binary.BigEndian, state.Nonces[s])
 	}
 	sum := sha256.Sum256(buf.Bytes())
 	return sum[:]
 }
-

@@ -15,16 +15,18 @@ import (
 )
 
 type Config struct {
-	NumNodes          int     `json:"NumNodes"`
-	BlocksToFinalize  int     `json:"BlocksToFinalize"`
-	Seed              int64   `json:"Seed"`
-	MaxTicks          int     `json:"MaxTicks"`
-	LatencyMin        int     `json:"LatencyMin"`
-	LatencyMax        int     `json:"LatencyMax"`
-	DropRate          float64 `json:"DropRate"`
-	DuplicateRate     float64 `json:"DuplicateRate"`
-	MaxQueuePerTick   int     `json:"MaxQueue"`
-	DeterministicLogs bool    `json:"DeterministicLogs"`
+	NumNodes           int     `json:"NumNodes"`
+	BlocksToFinalize   int     `json:"BlocksToFinalize"`
+	Seed               int64   `json:"Seed"`
+	MaxTicks           int     `json:"MaxTicks"`
+	LatencyMin         int     `json:"LatencyMin"`
+	LatencyMax         int     `json:"LatencyMax"`
+	DropRate           float64 `json:"DropRate"`
+	DuplicateRate      float64 `json:"DuplicateRate"`
+	MaxQueuePerTick    int     `json:"MaxQueue"`
+	MaxOutboundPerTick int     `json:"MaxOutboundPerTick"`
+	BlockDurationTicks int     `json:"BlockDurationTicks"`
+	DeterministicLogs  bool    `json:"DeterministicLogs"`
 }
 
 func main() {
@@ -39,6 +41,9 @@ func main() {
 	var cfg Config
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		log.Fatal(err)
+	}
+	if cfg.NumNodes < 8 {
+		log.Fatalf("NumNodes must be >= 8, got %d", cfg.NumNodes)
 	}
 
 	_ = os.MkdirAll("logs", 0755)
@@ -60,8 +65,14 @@ func main() {
 	if cfg.MaxQueuePerTick == 0 {
 		cfg.MaxQueuePerTick = 1024
 	}
+	if cfg.MaxOutboundPerTick < 0 {
+		cfg.MaxOutboundPerTick = 0
+	}
+	if cfg.BlockDurationTicks <= 0 {
+		cfg.BlockDurationTicks = 5
+	}
 
-	net := core.NewNetwork(cfg.Seed, cfg.LatencyMin, cfg.LatencyMax, cfg.DropRate, cfg.DuplicateRate, cfg.MaxQueuePerTick, logger)
+	net := core.NewNetwork(cfg.Seed, cfg.LatencyMin, cfg.LatencyMax, cfg.DropRate, cfg.DuplicateRate, cfg.MaxQueuePerTick, logger, cfg.MaxOutboundPerTick, cfg.BlockDurationTicks)
 
 	// create nodes
 	nodes := make([]*core.Node, 0, cfg.NumNodes)
@@ -107,5 +118,5 @@ func main() {
 	// dump final state of node0
 	s := nodes[0].SnapshotState()
 	sb, _ := json.MarshalIndent(s, "", "  ")
-	logger.Printf("STATE|node=node00|%s", string(sb))
+	logger.Printf("STATE|node=%s|%s", nodes[0].ID(), string(sb))
 }

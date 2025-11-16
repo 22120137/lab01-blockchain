@@ -9,16 +9,18 @@ import (
 
 // duplicate config struct
 type testConfig struct {
-	NumNodes          int     `json:"NumNodes"`
-	BlocksToFinalize  int     `json:"BlocksToFinalize"`
-	Seed              int64   `json:"Seed"`
-	MaxTicks          int     `json:"MaxTicks"`
-	LatencyMin        int     `json:"LatencyMin"`
-	LatencyMax        int     `json:"LatencyMax"`
-	DropRate          float64 `json:"DropRate"`
-	DuplicateRate     float64 `json:"DuplicateRate"`
-	MaxQueuePerTick   int     `json:"MaxQueue"`
-	DeterministicLogs bool    `json:"DeterministicLogs"`
+	NumNodes           int     `json:"NumNodes"`
+	BlocksToFinalize   int     `json:"BlocksToFinalize"`
+	Seed               int64   `json:"Seed"`
+	MaxTicks           int     `json:"MaxTicks"`
+	LatencyMin         int     `json:"LatencyMin"`
+	LatencyMax         int     `json:"LatencyMax"`
+	DropRate           float64 `json:"DropRate"`
+	DuplicateRate      float64 `json:"DuplicateRate"`
+	MaxQueuePerTick    int     `json:"MaxQueue"`
+	MaxOutboundPerTick int     `json:"MaxOutboundPerTick"`
+	BlockDurationTicks int     `json:"BlockDurationTicks"`
+	DeterministicLogs  bool    `json:"DeterministicLogs"`
 }
 
 // findProjectRoot walks up from cwd until it finds go.mod or reaches root

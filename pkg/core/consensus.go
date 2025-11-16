@@ -20,7 +20,7 @@ type Node struct {
 	pubs   map[NodeID]ed25519.PublicKey
 	net    *Network
 	inbox  chan NetMsg
-	state  map[string]string
+	state  *State
 	height uint64
 
 	votes         map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
@@ -43,7 +43,7 @@ func NewNode(id NodeID, seed int64, numNodes int, logger *util.Logger) *Node {
 		id:            id,
 		kp:            kp,
 		pubs:          make(map[NodeID]ed25519.PublicKey),
-		state:         make(map[string]string),
+		state:         NewState(),
 		votes:         make(map[uint64]map[string]map[VotePhase]map[NodeID]bool),
 		pendingBlocks: make(map[uint64]map[string]*Block),
 		ledger:        make([]Block, 0),
@@ -79,8 +79,9 @@ func (n *Node) OnTick() {
 	h := n.height + 1
 	proposer := NodeID(fmt.Sprintf("node%02d", int(h-1)%n.numNodes))
 	if proposer == n.id {
+		nonce := n.state.Nonces[string(n.id)] + 1
 		// make a block with a sample tx
-		tx := Transaction{Sender: string(n.id), Key: string(n.id) + "/k", Value: fmt.Sprintf("v%d", h), Nonce: h}
+		tx := Transaction{Sender: string(n.id), Key: string(n.id) + "/k", Value: fmt.Sprintf("v%d", h), Nonce: nonce}
 		bt := MarshalTxCanonical(tx)
 		tx.Sig = SignWithDomain("TX:", bt, n.kp.Priv)
 		// apply locally
@@ -88,10 +89,7 @@ func (n *Node) OnTick() {
 		copy(parentHash, n.lastBlockHash)
 		blk := &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, StateHash: nil, Proposer: n.id}, Txns: []Transaction{tx}}
 		// compute state hash
-		st := make(map[string]string)
-		for k, v := range n.state {
-			st[k] = v
-		}
+		st := n.state.Clone()
 		_ = ApplyTx(st, tx)
 		blk.Header.StateHash = StateHash(st)
 		hb := MarshalHeaderCanonical(&blk.Header)
@@ -281,10 +279,7 @@ func (n *Node) tryFinalizeLocked(height uint64, hashHex string) {
 
 func (n *Node) verifyBlockTransactions(blk Block) bool {
 	n.mu.Lock()
-	temp := make(map[string]string, len(n.state))
-	for k, v := range n.state {
-		temp[k] = v
-	}
+	temp := n.state.Clone()
 	n.mu.Unlock()
 	for _, tx := range blk.Txns {
 		senderID := NodeID(tx.Sender)
@@ -319,7 +314,10 @@ func (n *Node) isValidParentLocked(parent []byte, height uint64) bool {
 
 func (n *Node) applyBlock(blk *Block) {
 	for _, tx := range blk.Txns {
-		_ = ApplyTx(n.state, tx)
+		if err := ApplyTx(n.state, tx); err != nil {
+			n.Log.Printf("NODE|%s|APPLY|err=%v", n.id, err)
+			return
+		}
 	}
 }
 
@@ -332,13 +330,23 @@ func cloneBytes(b []byte) []byte {
 	return cp
 }
 
+func (n *Node) ID() NodeID {
+	return n.id
+}
+
 func (n *Node) FinalizedHeight() uint64 { return n.finalized }
-func (n *Node) SnapshotState() map[string]string {
+
+type StateSnapshot struct {
+	Data   map[string]string `json:"data"`
+	Nonces map[string]uint64 `json:"nonces"`
+}
+
+func (n *Node) SnapshotState() StateSnapshot {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	copy := make(map[string]string)
-	for k, v := range n.state {
-		copy[k] = v
+	clone := n.state.Clone()
+	return StateSnapshot{
+		Data:   clone.Data,
+		Nonces: clone.Nonces,
 	}
-	return copy
 }

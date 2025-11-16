@@ -3,8 +3,15 @@ package core
 import "testing"
 
 func TestStateHashDeterministic(t *testing.T) {
-	s1 := map[string]string{"b": "2", "a": "1"}
-	s2 := map[string]string{"a": "1", "b": "2"}
+	s1 := NewState()
+	s1.Data["b"] = "2"
+	s1.Data["a"] = "1"
+	s1.Nonces["alice"] = 3
+
+	s2 := NewState()
+	s2.Data["a"] = "1"
+	s2.Data["b"] = "2"
+	s2.Nonces["alice"] = 3
 
 	h1 := StateHash(s1)
 	h2 := StateHash(s2)

@@ -1,5 +1,5 @@
 {
-  "NumNodes": 4,
+  "NumNodes": 8,
   "BlocksToFinalize": 5,
   "Seed": 42,
   "MaxTicks": 200,
@@ -8,5 +8,7 @@
   "DropRate": 0.05,
   "DuplicateRate": 0.05,
   "MaxQueue": 256,
+  "MaxOutboundPerTick": 5,
+  "BlockDurationTicks": 5,
   "DeterministicLogs": true
 }
