@@ -49,7 +49,12 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	configPath := filepath.Join(root, "config", "scenario1.json")
 	if _, err := os.Stat(configPath); err != nil {
-		t.Fatalf("config file not found at %s: %v", configPath, err)
+		alt := filepath.Join(root, "..", "config", "scenario1.json")
+		if _, err2 := os.Stat(alt); err2 == nil {
+			configPath = alt
+		} else {
+			t.Fatalf("config file not found (checked %s and %s)", configPath, alt)
+		}
 	}
 
 	b, err := os.ReadFile(configPath)

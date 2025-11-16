@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 
 	"lab01/pkg/util"
@@ -201,6 +202,53 @@ func (net *Network) Send(from, to NodeID, body interface{}) {
 	}
 }
 
+func (net *Network) sendWithExtraDelay(from, to NodeID, body interface{}, extra int) {
+	net.mu.Lock()
+	defer net.mu.Unlock()
+	if until, ok := net.blockedPeers[from]; ok && net.curTick >= until {
+		delete(net.blockedPeers, from)
+		net.logEvent("UNBLOCK", from, "", nil, fmt.Sprintf("tick=%d", net.curTick))
+	}
+	if until, ok := net.blockedPeers[from]; ok {
+		net.logEvent("BLOCKED", from, to, body, fmt.Sprintf("until=%d", until))
+		return
+	}
+	if net.maxOutboundPerTick > 0 {
+		net.sentThisTick[from]++
+		if net.sentThisTick[from] > net.maxOutboundPerTick {
+			net.blockedPeers[from] = net.curTick + net.blockDurationTicks
+			net.logEvent("RATE_BLOCK", from, to, body, fmt.Sprintf("until=%d", net.blockedPeers[from]))
+			return
+		}
+	}
+
+	lat := net.minLatency
+	if net.maxLatency > net.minLatency {
+		lat += net.rng.Intn(net.maxLatency - net.minLatency + 1)
+	}
+	if extra > 0 {
+		lat += extra
+	}
+	deliveryTick := net.curTick + lat
+	if net.dropRate > 0 && net.rng.Float64() < net.dropRate {
+		net.logEvent("DROP", from, to, body, fmt.Sprintf("lat=%d", lat))
+		return
+	}
+	msg := NetMsg{From: from, To: to, Body: body}
+	if !net.enqueue(deliveryTick, msg) {
+		net.logEvent("QUEUE_FULL", from, to, body, fmt.Sprintf("deliver_tick=%d", deliveryTick))
+		return
+	}
+	net.logEvent("SEND", from, to, body, fmt.Sprintf("deliver_tick=%d|type=%T", deliveryTick, body))
+	if net.duplicateRate > 0 && net.rng.Float64() < net.duplicateRate {
+		if net.enqueue(deliveryTick, msg) {
+			net.logEvent("DUP", from, to, body, fmt.Sprintf("tick=%d", deliveryTick))
+		} else {
+			net.logEvent("DUP_DROP", from, to, body, fmt.Sprintf("tick=%d", deliveryTick))
+		}
+	}
+}
+
 func (net *Network) Broadcast(from NodeID, body interface{}) {
 	net.mu.Lock()
 	// copy keys to avoid holding lock during sends to channel (but we still need to append to queues)
@@ -208,6 +256,7 @@ func (net *Network) Broadcast(from NodeID, body interface{}) {
 	for id := range net.nodes {
 		ids = append(ids, id)
 	}
+	sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
 	net.mu.Unlock()
 
 	// call Send for each recipient (Send itself locks for queues/rng)
@@ -216,14 +265,35 @@ func (net *Network) Broadcast(from NodeID, body interface{}) {
 	}
 }
 
+func (net *Network) BroadcastWithDelay(from NodeID, body interface{}, extra int) {
+	net.mu.Lock()
+	ids := make([]NodeID, 0, len(net.nodes))
+	for id := range net.nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
+	net.mu.Unlock()
+
+	for _, id := range ids {
+		net.sendWithExtraDelay(from, id, body, extra)
+	}
+}
+
 func (net *Network) Tick() {
 	net.mu.Lock()
 	net.curTick++
 	net.sentThisTick = make(map[NodeID]int)
-	for id, until := range net.blockedPeers {
-		if net.curTick >= until {
-			delete(net.blockedPeers, id)
-			net.logEvent("UNBLOCK", id, "", nil, fmt.Sprintf("tick=%d", net.curTick))
+	if len(net.blockedPeers) > 0 {
+		ids := make([]NodeID, 0, len(net.blockedPeers))
+		for id := range net.blockedPeers {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
+		for _, id := range ids {
+			if net.curTick >= net.blockedPeers[id] {
+				delete(net.blockedPeers, id)
+				net.logEvent("UNBLOCK", id, "", nil, fmt.Sprintf("tick=%d", net.curTick))
+			}
 		}
 	}
 	msgs := net.queues[net.curTick]
@@ -234,6 +304,20 @@ func (net *Network) Tick() {
 	if len(msgs) == 0 {
 		return
 	}
+	sort.SliceStable(msgs, func(i, j int) bool {
+		if msgs[i].From != msgs[j].From {
+			return string(msgs[i].From) < string(msgs[j].From)
+		}
+		if msgs[i].To != msgs[j].To {
+			return string(msgs[i].To) < string(msgs[j].To)
+		}
+		ti := fmt.Sprintf("%T", msgs[i].Body)
+		tj := fmt.Sprintf("%T", msgs[j].Body)
+		if ti != tj {
+			return ti < tj
+		}
+		return i < j
+	})
 
 	// deliver messages (non-blocking sends)
 	for _, m := range msgs {

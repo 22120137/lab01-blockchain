@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"lab01/pkg/util"
 )
@@ -25,22 +24,22 @@ type Node struct {
 	state  *State
 	height uint64
 
-	votes             map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
-	pendingBlocks     map[uint64]map[string]*Block
-	ledger            []Block
-	lastBlockHash     []byte
-	sentPrecommit     map[uint64]string
-	txPool            map[string]Transaction // key sender/nonce
-	poolNonce         map[string]uint64
-	maxTxPerBlock     int
-	proposalInterval  uint64
-	lastProposalTick  map[uint64]uint64
-	currentTick       uint64
-	nextSelfTxTick    uint64
-	rounds            map[uint64]uint64
-	lastVoteTick      map[uint64]uint64
-	Log               *util.Logger
-	numNodes          int
+	votes            map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
+	pendingBlocks    map[uint64]map[string]*Block
+	ledger           []Block
+	lastBlockHash    []byte
+	sentPrecommit    map[uint64]string
+	txPool           map[string]Transaction // key sender/nonce
+	poolNonce        map[string]uint64
+	maxTxPerBlock    int
+	proposalInterval uint64
+	lastProposalTick map[uint64]uint64
+	currentTick      uint64
+	nextSelfTxTick   uint64
+	rounds           map[uint64]uint64
+	lastVoteTick     map[uint64]uint64
+	Log              *util.Logger
+	numNodes         int
 
 	mu        sync.Mutex
 	seed      int64
@@ -79,21 +78,10 @@ func NewNode(id NodeID, seed int64, numNodes int, logger *util.Logger) *Node {
 func (n *Node) Start() {
 	// set pub map to self for now; main will populate later if needed
 	n.pubs[n.id] = n.kp.Pub
-	go n.loop()
-}
-
-func (n *Node) loop() {
-	for {
-		select {
-		case m := <-n.inbox:
-			n.handleNetMsg(m)
-		case <-time.After(200 * time.Millisecond):
-			// idle - no op
-		}
-	}
 }
 
 func (n *Node) OnTick() {
+	n.drainInbox()
 	n.mu.Lock()
 	n.currentTick++
 	tick := n.currentTick
@@ -124,14 +112,22 @@ func (n *Node) OnTick() {
 		n.storePendingBlockLocked(h, hashHex, blk)
 		n.mu.Unlock()
 		n.net.Broadcast(n.id, blk.Header)
-		go func(b *Block) {
-			time.Sleep(10 * time.Millisecond)
-			n.net.Broadcast(n.id, b)
-		}(blk)
+		n.net.BroadcastWithDelay(n.id, blk, 1)
 		n.Log.Printf("NODE|%s|PROPOSE|H=%d|txs=%d", n.id, h, len(blockTxs))
 		return
 	}
 	n.mu.Unlock()
+}
+
+func (n *Node) drainInbox() {
+	for {
+		select {
+		case m := <-n.inbox:
+			n.handleNetMsg(m)
+		default:
+			return
+		}
+	}
 }
 
 func (n *Node) handleNetMsg(m NetMsg) {
