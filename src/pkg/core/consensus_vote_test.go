@@ -9,7 +9,7 @@ import (
 
 func TestHandleVoteRejectsBadSignature(t *testing.T) {
 	logger := util.NewDeterministicLogger(io.Discard)
-	n := NewNode(NodeID("node00"), 1, 4, logger)
+	n := NewNode(NodeID("node00"), 1, 4, "test-chain", logger)
 	kp := GenKeypair()
 	n.pubs[NodeID("node01")] = kp.Pub
 

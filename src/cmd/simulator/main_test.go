@@ -21,6 +21,7 @@ type testConfig struct {
 	MaxOutboundPerTick int     `json:"MaxOutboundPerTick"`
 	BlockDurationTicks int     `json:"BlockDurationTicks"`
 	DeterministicLogs  bool    `json:"DeterministicLogs"`
+	ChainID            string  `json:"ChainID"`
 }
 
 // findProjectRoot walks up from cwd until it finds go.mod or reaches root
@@ -72,5 +73,8 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	if cfg.MaxTicks <= 0 {
 		t.Fatalf("MaxTicks must be >0, got %d", cfg.MaxTicks)
+	}
+	if cfg.ChainID == "" {
+		t.Fatalf("ChainID must be set")
 	}
 }

@@ -27,6 +27,7 @@ type Config struct {
 	MaxOutboundPerTick int     `json:"MaxOutboundPerTick"`
 	BlockDurationTicks int     `json:"BlockDurationTicks"`
 	DeterministicLogs  bool    `json:"DeterministicLogs"`
+	ChainID            string  `json:"ChainID"`
 }
 
 func main() {
@@ -44,6 +45,9 @@ func main() {
 	}
 	if cfg.NumNodes < 8 {
 		log.Fatalf("NumNodes must be >= 8, got %d", cfg.NumNodes)
+	}
+	if cfg.ChainID == "" {
+		log.Fatalf("ChainID must be provided in config")
 	}
 
 	_ = os.MkdirAll("logs", 0755)
@@ -78,7 +82,7 @@ func main() {
 	nodes := make([]*core.Node, 0, cfg.NumNodes)
 	for i := 0; i < cfg.NumNodes; i++ {
 		id := core.NodeID(fmt.Sprintf("node%02d", i))
-		n := core.NewNode(id, cfg.Seed+int64(i), cfg.NumNodes, logger)
+		n := core.NewNode(id, cfg.Seed+int64(i), cfg.NumNodes, cfg.ChainID, logger)
 		core.RegisterNode(net, n)
 		nodes = append(nodes, n)
 	}

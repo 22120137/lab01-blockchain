@@ -10,7 +10,7 @@ go build -o ../bin/simulator ./cmd/simulator
 ../bin/simulator -config ../config/scenario1.json -out ../logs/run.log
 ```
 
-`config/scenario1.json` defines number of validators, latency window, drop/duplicate rate, queue limits, outbound rate limit, and temporary block duration. Set `DeterministicLogs` to `true` in the config to obtain byte-stable logs.
+`config/scenario1.json` defines number of validators, latency window, drop/duplicate rate, queue limits, outbound rate limit, temporary block duration, and the `ChainID` used for domain-separated signatures. Set `DeterministicLogs` to `true` in the config to obtain byte-stable logs.
 
 ## Testing
 

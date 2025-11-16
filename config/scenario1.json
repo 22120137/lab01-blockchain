@@ -10,5 +10,6 @@
   "MaxQueue": 256,
   "MaxOutboundPerTick": 5,
   "BlockDurationTicks": 5,
-  "DeterministicLogs": true
+  "DeterministicLogs": true,
+  "ChainID": "lab01-chain"
 }

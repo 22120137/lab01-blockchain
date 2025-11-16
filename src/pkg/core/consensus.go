@@ -16,13 +16,14 @@ import (
 // Node implements minimal proposer/voting
 
 type Node struct {
-	id     NodeID
-	kp     Keypair
-	pubs   map[NodeID]ed25519.PublicKey
-	net    *Network
-	inbox  chan NetMsg
-	state  *State
-	height uint64
+	id      NodeID
+	kp      Keypair
+	pubs    map[NodeID]ed25519.PublicKey
+	net     *Network
+	inbox   chan NetMsg
+	state   *State
+	height  uint64
+	chainID string
 
 	votes            map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
 	pendingBlocks    map[uint64]map[string]*Block
@@ -47,7 +48,7 @@ type Node struct {
 }
 
 // NewNode creates a node, numNodes is the total validators count
-func NewNode(id NodeID, seed int64, numNodes int, logger *util.Logger) *Node {
+func NewNode(id NodeID, seed int64, numNodes int, chainID string, logger *util.Logger) *Node {
 	kp := GenKeypair()
 	n := &Node{
 		id:               id,
@@ -71,6 +72,7 @@ func NewNode(id NodeID, seed int64, numNodes int, logger *util.Logger) *Node {
 		Log:              logger,
 		numNodes:         numNodes,
 		seed:             seed,
+		chainID:          chainID,
 	}
 	return n
 }
@@ -107,7 +109,7 @@ func (n *Node) OnTick() {
 		blk := &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, StateHash: nil, Proposer: n.id}, Txns: blockTxs}
 		blk.Header.StateHash = StateHash(st)
 		hb := MarshalHeaderCanonical(&blk.Header)
-		blk.Header.Sig = SignWithDomain("HEADER:", hb, n.kp.Priv)
+		blk.Header.Sig = SignWithDomain(n.domainHeader(), hb, n.kp.Priv)
 		hashHex := hex.EncodeToString(HashBlockHeader(&blk.Header))
 		n.storePendingBlockLocked(h, hashHex, blk)
 		n.mu.Unlock()
@@ -130,6 +132,17 @@ func (n *Node) drainInbox() {
 	}
 }
 
+func (n *Node) domain(tag string) string {
+	if n.chainID == "" {
+		return tag + ":"
+	}
+	return fmt.Sprintf("%s:%s", tag, n.chainID)
+}
+
+func (n *Node) domainTx() string     { return n.domain("TX") }
+func (n *Node) domainHeader() string { return n.domain("HEADER") }
+func (n *Node) domainVote() string   { return n.domain("VOTE") }
+
 func (n *Node) handleNetMsg(m NetMsg) {
 	// handle types: BlockHeader, Block, Vote
 	switch body := m.Body.(type) {
@@ -141,7 +154,7 @@ func (n *Node) handleNetMsg(m NetMsg) {
 			n.Log.Printf("NODE|%s|RECV|HEADER|unknown_proposer=%s|H=%d", n.id, body.Proposer, body.Height)
 			break
 		}
-		if VerifyWithDomain("HEADER:", MarshalHeaderCanonical(&body), body.Sig, pub) {
+		if VerifyWithDomain(n.domainHeader(), MarshalHeaderCanonical(&body), body.Sig, pub) {
 			// ensure parent matches current finalized view
 			n.mu.Lock()
 			validParent := n.isValidParentLocked(body.ParentHash, body.Height)
@@ -175,7 +188,7 @@ func (n *Node) handleNetMsg(m NetMsg) {
 			n.Log.Printf("NODE|%s|RECV|VOTE|unknown_voter=%s|H=%d", n.id, body.Voter, body.Height)
 			break
 		}
-		if !VerifyWithDomain("VOTE:", MarshalVoteCanonical(&body), body.Sig, pub) {
+		if !VerifyWithDomain(n.domainVote(), MarshalVoteCanonical(&body), body.Sig, pub) {
 			n.Log.Printf("NODE|%s|RECV|VOTE|badsig|from=%s|H=%d", n.id, body.Voter, body.Height)
 			break
 		}
@@ -197,7 +210,7 @@ func (n *Node) handleNetMsg(m NetMsg) {
 		if num >= (n.numNodes/2 + 1) {
 			if n.sentPrecommit[body.Height] != hashHex {
 				pc := Vote{Voter: n.id, Height: body.Height, BlockHash: body.BlockHash, Phase: PhasePrecommit}
-				pc.Sig = SignWithDomain("VOTE:", MarshalVoteCanonical(&pc), n.kp.Priv)
+				pc.Sig = SignWithDomain(n.domainVote(), MarshalVoteCanonical(&pc), n.kp.Priv)
 				n.net.Broadcast(n.id, pc)
 				n.sentPrecommit[body.Height] = hashHex
 				n.Log.Printf("NODE|%s|SENT|PRECOMMIT|H=%d", n.id, body.Height)
@@ -217,7 +230,7 @@ func (n *Node) handleBlockMsg(body *Block, from NodeID) {
 		n.Log.Printf("NODE|%s|RECV|BLOCK|unknown_proposer=%s|H=%d", n.id, body.Header.Proposer, body.Header.Height)
 		return
 	}
-	if !VerifyWithDomain("HEADER:", MarshalHeaderCanonical(&body.Header), body.Header.Sig, pub) {
+	if !VerifyWithDomain(n.domainHeader(), MarshalHeaderCanonical(&body.Header), body.Header.Sig, pub) {
 		n.Log.Printf("NODE|%s|RECV|BLOCK|badsig|proposer=%s|H=%d", n.id, body.Header.Proposer, body.Header.Height)
 		return
 	}
@@ -267,7 +280,7 @@ func (n *Node) maybeGenerateSelfTx(tick uint64) {
 
 	tx := Transaction{Sender: sender, Key: key, Value: value, Nonce: nonce}
 	bt := MarshalTxCanonical(tx)
-	tx.Sig = SignWithDomain("TX:", bt, n.kp.Priv)
+	tx.Sig = SignWithDomain(n.domainTx(), bt, n.kp.Priv)
 	if n.addTxToPool(tx) {
 		n.net.Broadcast(n.id, tx)
 		n.Log.Printf("NODE|%s|ENQUEUE_TX|nonce=%d", n.id, nonce)
@@ -306,7 +319,7 @@ func (n *Node) addTxToPool(tx Transaction) bool {
 	if !ok {
 		return false
 	}
-	if !VerifyWithDomain("TX:", MarshalTxCanonical(tx), tx.Sig, pub) {
+	if !VerifyWithDomain(n.domainTx(), MarshalTxCanonical(tx), tx.Sig, pub) {
 		return false
 	}
 	n.mu.Lock()
@@ -356,7 +369,7 @@ func (n *Node) removeTxsFromPoolLocked(txs []Transaction) {
 
 func (n *Node) broadcastPrevote(height uint64, hash []byte) {
 	v := Vote{Voter: n.id, Height: height, BlockHash: hash, Phase: PhasePrevote}
-	v.Sig = SignWithDomain("VOTE:", MarshalVoteCanonical(&v), n.kp.Priv)
+	v.Sig = SignWithDomain(n.domainVote(), MarshalVoteCanonical(&v), n.kp.Priv)
 	n.net.Broadcast(n.id, v)
 	n.Log.Printf("NODE|%s|SENT|PREVOTE|H=%d", n.id, height)
 }
@@ -431,7 +444,7 @@ func (n *Node) verifyBlockTransactions(blk Block) bool {
 			n.Log.Printf("NODE|%s|BLOCK|unknown_sender=%s|H=%d", n.id, tx.Sender, blk.Header.Height)
 			return false
 		}
-		if !VerifyWithDomain("TX:", MarshalTxCanonical(tx), tx.Sig, pub) {
+		if !VerifyWithDomain(n.domainTx(), MarshalTxCanonical(tx), tx.Sig, pub) {
 			n.Log.Printf("NODE|%s|BLOCK|badsig_tx|sender=%s|H=%d", n.id, tx.Sender, blk.Header.Height)
 			return false
 		}
