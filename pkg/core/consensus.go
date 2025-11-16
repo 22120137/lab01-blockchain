@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,13 +25,20 @@ type Node struct {
 	state  *State
 	height uint64
 
-	votes         map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
-	pendingBlocks map[uint64]map[string]*Block
-	ledger        []Block
-	lastBlockHash []byte
-	sentPrecommit map[uint64]string
-	Log           *util.Logger
-	numNodes      int
+	votes            map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
+	pendingBlocks    map[uint64]map[string]*Block
+	ledger           []Block
+	lastBlockHash    []byte
+	sentPrecommit    map[uint64]string
+	txPool           map[string]Transaction // key sender/nonce
+	poolNonce        map[string]uint64
+	maxTxPerBlock    int
+	proposalInterval uint64
+	lastProposalTick map[uint64]uint64
+	currentTick      uint64
+	nextSelfTxTick   uint64
+	Log              *util.Logger
+	numNodes         int
 
 	mu        sync.Mutex
 	seed      int64
@@ -40,18 +49,25 @@ type Node struct {
 func NewNode(id NodeID, seed int64, numNodes int, logger *util.Logger) *Node {
 	kp := GenKeypair()
 	n := &Node{
-		id:            id,
-		kp:            kp,
-		pubs:          make(map[NodeID]ed25519.PublicKey),
-		state:         NewState(),
-		votes:         make(map[uint64]map[string]map[VotePhase]map[NodeID]bool),
-		pendingBlocks: make(map[uint64]map[string]*Block),
-		ledger:        make([]Block, 0),
-		lastBlockHash: nil,
-		sentPrecommit: make(map[uint64]string),
-		Log:           logger,
-		numNodes:      numNodes,
-		seed:          seed,
+		id:               id,
+		kp:               kp,
+		pubs:             make(map[NodeID]ed25519.PublicKey),
+		state:            NewState(),
+		votes:            make(map[uint64]map[string]map[VotePhase]map[NodeID]bool),
+		pendingBlocks:    make(map[uint64]map[string]*Block),
+		ledger:           make([]Block, 0),
+		lastBlockHash:    nil,
+		sentPrecommit:    make(map[uint64]string),
+		txPool:           make(map[string]Transaction),
+		poolNonce:        make(map[string]uint64),
+		maxTxPerBlock:    8,
+		proposalInterval: 5,
+		lastProposalTick: make(map[uint64]uint64),
+		currentTick:      0,
+		nextSelfTxTick:   0,
+		Log:              logger,
+		numNodes:         numNodes,
+		seed:             seed,
 	}
 	return n
 }
@@ -74,36 +90,42 @@ func (n *Node) loop() {
 }
 
 func (n *Node) OnTick() {
-	// simple proposer: if this node is proposer for next height, make block
+	n.mu.Lock()
+	n.currentTick++
+	tick := n.currentTick
+	n.mu.Unlock()
+
+	n.maybeGenerateSelfTx(tick)
+
 	n.mu.Lock()
 	h := n.height + 1
 	proposer := NodeID(fmt.Sprintf("node%02d", int(h-1)%n.numNodes))
 	if proposer == n.id {
-		nonce := n.state.Nonces[string(n.id)] + 1
-		// make a block with a sample tx
-		tx := Transaction{Sender: string(n.id), Key: string(n.id) + "/k", Value: fmt.Sprintf("v%d", h), Nonce: nonce}
-		bt := MarshalTxCanonical(tx)
-		tx.Sig = SignWithDomain("TX:", bt, n.kp.Priv)
-		// apply locally
-		parentHash := make([]byte, len(n.lastBlockHash))
-		copy(parentHash, n.lastBlockHash)
-		blk := &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, StateHash: nil, Proposer: n.id}, Txns: []Transaction{tx}}
-		// compute state hash
+		if last := n.lastProposalTick[h]; last != 0 && tick-last < n.proposalInterval {
+			n.mu.Unlock()
+			return
+		}
+		n.lastProposalTick[h] = tick
+		parentHash := cloneBytes(n.lastBlockHash)
+		blockTxs := n.selectTxsForBlockLocked()
 		st := n.state.Clone()
-		_ = ApplyTx(st, tx)
+		for _, tx := range blockTxs {
+			_ = ApplyTx(st, tx)
+		}
+		blk := &Block{Header: BlockHeader{ParentHash: parentHash, Height: h, StateHash: nil, Proposer: n.id}, Txns: blockTxs}
 		blk.Header.StateHash = StateHash(st)
 		hb := MarshalHeaderCanonical(&blk.Header)
 		blk.Header.Sig = SignWithDomain("HEADER:", hb, n.kp.Priv)
 		hashHex := hex.EncodeToString(HashBlockHeader(&blk.Header))
 		n.storePendingBlockLocked(h, hashHex, blk)
-		// broadcast header first
+		n.mu.Unlock()
 		n.net.Broadcast(n.id, blk.Header)
-		// schedule body a tick later (we use goroutine and sleep to simulate)
 		go func(b *Block) {
 			time.Sleep(10 * time.Millisecond)
 			n.net.Broadcast(n.id, b)
 		}(blk)
-		n.Log.Printf("NODE|%s|PROPOSE|H=%d", n.id, h)
+		n.Log.Printf("NODE|%s|PROPOSE|H=%d|txs=%d", n.id, h, len(blockTxs))
+		return
 	}
 	n.mu.Unlock()
 }
@@ -140,6 +162,11 @@ func (n *Node) handleNetMsg(m NetMsg) {
 		n.handleBlockMsg(&b, m.From)
 	case *Block:
 		n.handleBlockMsg(body, m.From)
+	case Transaction:
+		tx := body
+		n.handleTxMessage(&tx, m.From)
+	case *Transaction:
+		n.handleTxMessage(body, m.From)
 
 	case Vote:
 		n.Log.Printf("NODE|%s|RECV|VOTE|from=%s|H=%d|phase=%s", n.id, m.From, body.Height, body.Phase)
@@ -212,6 +239,121 @@ func (n *Node) handleBlockMsg(body *Block, from NodeID) {
 	n.broadcastPrevote(body.Header.Height, hash)
 }
 
+func (n *Node) handleTxMessage(tx *Transaction, from NodeID) {
+	if tx == nil {
+		return
+	}
+	if n.addTxToPool(*tx) {
+		n.Log.Printf("NODE|%s|RECV|TX|from=%s|sender=%s|nonce=%d", n.id, from, tx.Sender, tx.Nonce)
+	}
+}
+
+func (n *Node) maybeGenerateSelfTx(tick uint64) {
+	n.mu.Lock()
+	if tick < n.nextSelfTxTick {
+		n.mu.Unlock()
+		return
+	}
+	sender := string(n.id)
+	base := n.state.Nonces[sender]
+	if v := n.poolNonce[sender]; v > base {
+		base = v
+	}
+	nonce := base + 1
+	key := fmt.Sprintf("%s/auto%d", sender, nonce)
+	value := fmt.Sprintf("val%d", nonce)
+	n.nextSelfTxTick = tick + 5
+	n.mu.Unlock()
+
+	tx := Transaction{Sender: sender, Key: key, Value: value, Nonce: nonce}
+	bt := MarshalTxCanonical(tx)
+	tx.Sig = SignWithDomain("TX:", bt, n.kp.Priv)
+	if n.addTxToPool(tx) {
+		n.net.Broadcast(n.id, tx)
+		n.Log.Printf("NODE|%s|ENQUEUE_TX|nonce=%d", n.id, nonce)
+	}
+}
+
+func (n *Node) selectTxsForBlockLocked() []Transaction {
+	if len(n.txPool) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(n.txPool))
+	for k := range n.txPool {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	st := n.state.Clone()
+	selected := make([]Transaction, 0, n.maxTxPerBlock)
+	for _, key := range keys {
+		if len(selected) >= n.maxTxPerBlock {
+			break
+		}
+		tx := n.txPool[key]
+		if err := ApplyTx(st, tx); err != nil {
+			continue
+		}
+		selected = append(selected, tx)
+	}
+	return selected
+}
+
+func (n *Node) addTxToPool(tx Transaction) bool {
+	if !ownsKey(tx) {
+		return false
+	}
+	pub, ok := n.pubs[NodeID(tx.Sender)]
+	if !ok {
+		return false
+	}
+	if !VerifyWithDomain("TX:", MarshalTxCanonical(tx), tx.Sig, pub) {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	base := n.state.Nonces[tx.Sender]
+	if v := n.poolNonce[tx.Sender]; v > base {
+		base = v
+	}
+	if tx.Nonce != base+1 {
+		return false
+	}
+	key := txPoolKey(tx.Sender, tx.Nonce)
+	if _, exists := n.txPool[key]; exists {
+		return false
+	}
+	n.txPool[key] = tx
+	n.poolNonce[tx.Sender] = tx.Nonce
+	return true
+}
+
+func (n *Node) removeTxsFromPoolLocked(txs []Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	affected := make(map[string]bool)
+	for _, tx := range txs {
+		key := txPoolKey(tx.Sender, tx.Nonce)
+		delete(n.txPool, key)
+		affected[tx.Sender] = true
+	}
+	for sender := range affected {
+		maxNonce := n.state.Nonces[sender]
+		for key, tx := range n.txPool {
+			if strings.HasPrefix(key, sender+"/") {
+				if tx.Nonce > maxNonce {
+					maxNonce = tx.Nonce
+				}
+			}
+		}
+		if maxNonce == 0 {
+			delete(n.poolNonce, sender)
+		} else {
+			n.poolNonce[sender] = maxNonce
+		}
+	}
+}
+
 func (n *Node) broadcastPrevote(height uint64, hash []byte) {
 	v := Vote{Voter: n.id, Height: height, BlockHash: hash, Phase: PhasePrevote}
 	v.Sig = SignWithDomain("VOTE:", MarshalVoteCanonical(&v), n.kp.Priv)
@@ -270,6 +412,7 @@ func (n *Node) tryFinalizeLocked(height uint64, hashHex string) {
 	n.height = height
 	n.lastBlockHash = HashBlockHeader(&blk.Header)
 	n.ledger = append(n.ledger, *blk)
+	n.removeTxsFromPoolLocked(blk.Txns)
 	delete(blocks, hashHex)
 	if len(blocks) == 0 {
 		delete(n.pendingBlocks, height)
@@ -332,6 +475,15 @@ func cloneBytes(b []byte) []byte {
 
 func (n *Node) ID() NodeID {
 	return n.id
+}
+
+func txPoolKey(sender string, nonce uint64) string {
+	return fmt.Sprintf("%s/%d", sender, nonce)
+}
+
+func ownsKey(tx Transaction) bool {
+	prefix := tx.Sender + "/"
+	return strings.HasPrefix(tx.Key, prefix)
 }
 
 func (n *Node) FinalizedHeight() uint64 { return n.finalized }
