@@ -25,20 +25,22 @@ type Node struct {
 	state  *State
 	height uint64
 
-	votes            map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
-	pendingBlocks    map[uint64]map[string]*Block
-	ledger           []Block
-	lastBlockHash    []byte
-	sentPrecommit    map[uint64]string
-	txPool           map[string]Transaction // key sender/nonce
-	poolNonce        map[string]uint64
-	maxTxPerBlock    int
-	proposalInterval uint64
-	lastProposalTick map[uint64]uint64
-	currentTick      uint64
-	nextSelfTxTick   uint64
-	Log              *util.Logger
-	numNodes         int
+	votes             map[uint64]map[string]map[VotePhase]map[NodeID]bool // height->blockHashHex->phase->voter
+	pendingBlocks     map[uint64]map[string]*Block
+	ledger            []Block
+	lastBlockHash     []byte
+	sentPrecommit     map[uint64]string
+	txPool            map[string]Transaction // key sender/nonce
+	poolNonce         map[string]uint64
+	maxTxPerBlock     int
+	proposalInterval  uint64
+	lastProposalTick  map[uint64]uint64
+	currentTick       uint64
+	nextSelfTxTick    uint64
+	rounds            map[uint64]uint64
+	lastVoteTick      map[uint64]uint64
+	Log               *util.Logger
+	numNodes          int
 
 	mu        sync.Mutex
 	seed      int64
@@ -65,6 +67,8 @@ func NewNode(id NodeID, seed int64, numNodes int, logger *util.Logger) *Node {
 		lastProposalTick: make(map[uint64]uint64),
 		currentTick:      0,
 		nextSelfTxTick:   0,
+		rounds:           make(map[uint64]uint64),
+		lastVoteTick:     make(map[uint64]uint64),
 		Log:              logger,
 		numNodes:         numNodes,
 		seed:             seed,
