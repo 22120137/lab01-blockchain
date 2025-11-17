@@ -1,1 +1,5 @@
 bin/
+logs/*
+!logs/.gitkeep
+src/logs/*
+!src/logs/.gitkeep
