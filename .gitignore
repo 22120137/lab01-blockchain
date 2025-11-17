@@ -1,0 +1,5 @@
+bin/
+logs/
+src/logs/
+src/**/*.log
+.DS_Store

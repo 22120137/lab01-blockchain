@@ -36,7 +36,7 @@ cd src
 go run ./cmd/tools/checkdet -config ../config/scenario1.json
 ```
 
-This command relies on deterministic logging and is used to justify requirement 8 in `Lab01Final.txt`.
+The tool now compares both the simulator logs and the final state snapshot hashes, satisfying the “identical logs and final state” requirement in `Lab01Final.txt`.
 
 ## Submission Checklist
 
