@@ -80,8 +80,8 @@ func stateHashFromLog(path string) ([]byte, error) {
 	var stateLine string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "STATE|") {
-			stateLine = line
+		if idx := strings.Index(line, "|STATE|"); idx != -1 {
+			stateLine = line[idx+len("|STATE|"):]
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -90,12 +90,12 @@ func stateHashFromLog(path string) ([]byte, error) {
 	if stateLine == "" {
 		return nil, fmt.Errorf("no STATE line found")
 	}
-	parts := strings.SplitN(stateLine, "|", 3)
-	if len(parts) < 3 {
+	parts := strings.SplitN(stateLine, "|", 2)
+	if len(parts) != 2 {
 		return nil, fmt.Errorf("malformed STATE line")
 	}
 	var payload interface{}
-	if err := json.Unmarshal([]byte(parts[2]), &payload); err != nil {
+	if err := json.Unmarshal([]byte(parts[1]), &payload); err != nil {
 		return nil, err
 	}
 	canonical, err := json.Marshal(payload)

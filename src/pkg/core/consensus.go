@@ -74,7 +74,7 @@ func NewNode(id NodeID, seed int64, numNodes int, chainID string, logger *util.L
 		nextSelfTxTick:   0,
 		rounds:           make(map[uint64]uint64),
 		roundStart:       make(map[uint64]uint64),
-		roundTimeout:     60,
+		roundTimeout:     200,
 		lastVoteTick:     make(map[uint64]uint64),
 		bodySent:         make(map[uint64]map[string]map[NodeID]bool),
 		lockedBlock:      make(map[uint64]*Block),

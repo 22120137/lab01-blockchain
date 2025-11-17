@@ -121,6 +121,6 @@ func main() {
 	logger.Printf("SIM|TICKS=%d|END", ticks)
 	// dump final state of node0
 	s := nodes[0].SnapshotState()
-	sb, _ := json.MarshalIndent(s, "", "  ")
+	sb, _ := json.Marshal(s)
 	logger.Printf("STATE|node=%s|%s", nodes[0].ID(), string(sb))
 }

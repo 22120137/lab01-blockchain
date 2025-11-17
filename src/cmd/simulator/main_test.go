@@ -71,6 +71,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.NumNodes <= 0 {
 		t.Fatalf("NumNodes must be >0, got %d", cfg.NumNodes)
 	}
+	if cfg.NumNodes < 8 {
+		t.Fatalf("NumNodes must be >=8 to satisfy validator requirement, got %d", cfg.NumNodes)
+	}
 	if cfg.MaxTicks <= 0 {
 		t.Fatalf("MaxTicks must be >0, got %d", cfg.MaxTicks)
 	}
