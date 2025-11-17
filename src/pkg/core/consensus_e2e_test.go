@@ -26,6 +26,35 @@ func TestConsensus_SimpleFinalization(t *testing.T) {
 	}
 }
 
+func TestConsensusEightNodeFinalization(t *testing.T) {
+	logger := util.NewDeterministicLogger(io.Discard)
+	net := NewNetwork(8888, 1, 1, 0, 0, 128, logger, 0, 5)
+	nodes := buildTestNodes(net, logger, 8, 8888)
+	primeNodes(nodes, 0)
+
+	runTicks(net, nodes, 800)
+
+	minHeight := nodes[0].FinalizedHeight()
+	if minHeight < 1 {
+		t.Fatalf("node0 did not finalize height 1")
+	}
+	for _, n := range nodes {
+		if h := n.FinalizedHeight(); h < minHeight {
+			minHeight = h
+		}
+		if n.FinalizedHeight() < 1 {
+			t.Fatalf("node %s did not finalize height 1", n.id)
+		}
+	}
+	ref := nodes[0].LedgerSnapshot()[:minHeight]
+	for i, n := range nodes {
+		ledger := n.LedgerSnapshot()[:minHeight]
+		if !reflect.DeepEqual(ledger, ref) {
+			t.Fatalf("ledger mismatch at node %d", i)
+		}
+	}
+}
+
 func TestConsensusRejectsInvalidHeaderSignature(t *testing.T) {
 	logger := util.NewDeterministicLogger(io.Discard)
 	n := NewNode(NodeID("node00"), 1, 4, testChainID, logger)

@@ -97,6 +97,8 @@ func main() {
 
 	// run ticks until enough blocks finalized or max ticks
 	ticks := 0
+	allFinalized := false
+	finalizedCount := 0
 	for ticks < cfg.MaxTicks {
 		net.Tick()
 		for _, n := range nodes {
@@ -110,15 +112,21 @@ func main() {
 				count++
 			}
 		}
-		if count >= (cfg.NumNodes/2 + 1) {
-			logger.Printf("SIM|TICK=%d|DONE|finalized_by_majority=%d", ticks, count)
+		finalizedCount = count
+		if count == cfg.NumNodes {
+			logger.Printf("SIM|TICK=%d|DONE|finalized_all=%d", ticks, count)
+			allFinalized = true
 			break
 		}
 		// avoid busy loop
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	logger.Printf("SIM|TICKS=%d|END", ticks)
+	if !allFinalized {
+		logger.Printf("SIM|TICKS=%d|END|finalized=%d/%d", ticks, finalizedCount, cfg.NumNodes)
+	} else {
+		logger.Printf("SIM|TICKS=%d|END|finalized=%d/%d", ticks, cfg.NumNodes, cfg.NumNodes)
+	}
 	// dump final state of node0
 	s := nodes[0].SnapshotState()
 	sb, _ := json.Marshal(s)
