@@ -3,3 +3,4 @@ logs/*
 !logs/.gitkeep
 src/logs/*
 !src/logs/.gitkeep
+Lab01Final.txt
