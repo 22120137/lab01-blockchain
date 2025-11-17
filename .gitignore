@@ -1,5 +1,5 @@
 bin/
-logs/
-src/logs/
-src/**/*.log
-.DS_Store
+logs/*
+!logs/.gitkeep
+src/logs/*
+!src/logs/.gitkeep
