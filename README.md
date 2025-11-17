@@ -6,6 +6,15 @@ The Go module resides inside `src/`. All build/test commands should be issued fr
 
 ```powershell
 cd src
+if (!(Test-Path ..\bin)) { New-Item ..\bin -ItemType Directory | Out-Null }
+go build -o ../bin/simulator.exe ./cmd/simulator   # on Windows (.exe)
+../bin/simulator.exe -config ../config/scenario1.json -out ../logs/run.log
+```
+
+On Linux/macOS replace the last two lines with:
+
+```bash
+mkdir -p ../bin
 go build -o ../bin/simulator ./cmd/simulator
 ../bin/simulator -config ../config/scenario1.json -out ../logs/run.log
 ```
