@@ -70,5 +70,5 @@ powershell -ExecutionPolicy Bypass -File src\scripts\run_all.ps1
 - `tests/` có hướng dẫn chạy test từ `src/`.
 - `config/` chứa các file JSON (mặc định NumNodes=8).
 - `logs/` dành cho output chạy; dùng `.gitkeep` nếu cần giữ thư mục.
-- `README.md` (file này) và `REPORT.pdf` (thay placeholder bằng báo cáo thật).
+- `README.md` và `REPORT.pdf`.
 - `src/scripts/run_all.ps1` chạy test + determinism từ gốc repo.
