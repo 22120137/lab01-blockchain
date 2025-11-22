@@ -1,6 +1,11 @@
 ## Tests Overview
 
-The Go module now resides inside `src/`. All unit, integration, and determinism checks must be executed from that directory.
+Chương trình có 3 nhóm kiểm thử như sau:
+- **Unit/Integration**: crypto (domain ký), encoding/state hash, state machine (nonce/ownership), network simulator (delay/drop/dup/rate-limit), mempool, và consensus (vote, replay, lock).
+- **End-to-End**: các kịch bản đồng thuận (finalization, invalid header/vote, replay, delay/drop safety, determinism, và một case 8 node).
+- **Determinism**: chạy simulator hai lần với cùng config, so sánh byte-log và hash state cuối.
+
+Toàn bộ test chạy trong module `src/`.
 
 ### Run the full Go test suite
 
@@ -9,8 +14,6 @@ cd ..\src
 go test ./...
 ```
 
-This covers crypto, state machine, network simulator, consensus, and simulator packages.
-
 ### Determinism check
 
 ```powershell
@@ -18,14 +21,14 @@ cd ..\src
 go run ./cmd/tools/checkdet -config ../config/scenario1.json
 ```
 
-The command runs the simulator twice with the same configuration and ensures logs and state are identical.
+Lệnh này chạy simulator hai lần, kiểm tra log và state giống hệt nhau.
 
 ### Convenience script
 
-From the repository root you can run:
+Từ thư mục gốc:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File src\scripts\run_all.ps1
 ```
 
-The script automatically enters `src/`, runs `go test ./...`, and then performs the determinism check.
+Script tự động vào `src/`, chạy `go test ./...`, rồi chạy determinism check.
